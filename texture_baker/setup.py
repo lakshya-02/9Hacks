@@ -41,8 +41,14 @@ def get_extensions():
         else [],
         "nvcc": [
             "-O3" if not debug_mode else "-O0",
+            "--allow-unsupported-compiler",
         ],
     }
+    if platform.system() == "Windows":
+        extra_compile_args["cxx"] = [
+            "/O2" if not debug_mode else "/Od",
+            "/EHsc",
+        ]
     if debug_mode:
         extra_compile_args["cxx"].append("-g")
         if platform.system() == "Windows":
