@@ -131,6 +131,7 @@ async def upload_health():
 
 @upload_app.post("/generate")
 async def upload_generate(
+    request:              Request,
     file:                 UploadFile = File(...),
     texture_resolution:  int        = Query(default=None),
     foreground_ratio:    float      = Query(default=None),
@@ -139,7 +140,7 @@ async def upload_generate(
 ):
     """
     Unity sends:  POST http://{ip}:8080/generate  (multipart, field='file')
-    Returns:      {"job_id": "uuid"}
+    Returns:      {"job_id": "uuid", "download_url": "http://host:8081/download/{uuid}"}
     """
     if _model is None:
         raise HTTPException(status_code=503, detail="Model not ready yet.")
@@ -149,9 +150,14 @@ async def upload_generate(
     remesh_opt = remesh             or args.remesh
     job_id     = str(uuid.uuid4())
 
+    if file is None:
+        raise HTTPException(status_code=400, detail="No file uploaded.")
+
     # 1 — read and preprocess
     try:
         image_bytes = await file.read()
+        if not image_bytes:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
         image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
         image = remove_background(image, _rembg_session)
         image = resize_foreground(image, fg_ratio)
@@ -184,15 +190,45 @@ async def upload_generate(
 
     logger.info(f"Job {job_id} | {len(glb_bytes):,} bytes | tex={tex_res}px | remesh={remesh_opt}")
 
-    # 4 — return job_id to Unity
-    return {"job_id": job_id}
+    # 4 — return job metadata to Unity
+    server_host = request.url.hostname or args.host
+    if server_host in {"0.0.0.0", "::"}:
+        server_host = "localhost"
+
+    return {
+        "job_id": job_id,
+        "status": "completed",
+        "filename": f"{job_id}.glb",
+        "size_bytes": len(glb_bytes),
+        "download_url": f"http://{server_host}:{args.download_port}/download/{job_id}",
+    }
+
+
+@upload_app.post("/generate-from-image")
+async def upload_generate_from_image(
+    request:              Request,
+    image:                UploadFile = File(...),
+    texture_resolution:  int        = Query(default=None),
+    foreground_ratio:    float      = Query(default=None),
+    remesh:              str        = Query(default=None),
+    target_vertex_count: int        = Query(default=-1),
+):
+    # Compatibility alias for clients using multipart field name "image".
+    return await upload_generate(
+        request=request,
+        file=image,
+        texture_resolution=texture_resolution,
+        foreground_ratio=foreground_ratio,
+        remesh=remesh,
+        target_vertex_count=target_vertex_count,
+    )
 
 
 @upload_app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def upload_catch_all(request: Request, full_path: str):
     return JSONResponse(status_code=200, content={
         "info": f"/{full_path} not found on upload server (port {args.upload_port})",
-        "valid_routes": ["GET /", "GET /health", "POST /generate"],
+        "valid_routes": ["GET /", "GET /health", "POST /generate", "POST /generate-from-image"],
     })
 
 
