@@ -27,6 +27,7 @@ Stable Fast 3D is based on [TripoSR](https://github.com/VAST-AI-Research/TripoSR
 ### Installation
 
 Ensure your environment is:
+
 - Python >= 3.8
 - Optional: CUDA or MPS has to be available
 - For Windows **(experimental)**: Visual Studio 2022
@@ -51,7 +52,7 @@ Stable Fast 3D can also run on Macs via the MPS backend, with the texture baker 
 
 Note that support is **experimental** and not guaranteed to give the same performance and/or quality as the CUDA backend.
 
-You will need to install OpenMP runtime to enable clang support for `-fopenmp`. Follow the tutorial here https://mac.r-project.org/openmp/ 
+You will need to install OpenMP runtime to enable clang support for `-fopenmp`. Follow the tutorial here https://mac.r-project.org/openmp/
 
 MPS backend support was tested on M1 max 64GB with the latest PyTorch nightly release. We recommend you install the latest PyTorch (2.4.0 as of writing) and/or the nightly version to avoid any issues that my arise with older PyTorch versions.
 
@@ -77,6 +78,7 @@ If you have a GPU but are facing issues and want to use the CPU backend instead,
 ```sh
 python run.py demo_files/examples/chair1.png --output-dir output/
 ```
+
 This will save the reconstructed 3D model as a GLB file to `output/`. You can also specify more than one image path separated by spaces. The default options takes about **6GB VRAM** for a single image input.
 
 You may also use `--texture-resolution` to specify the resolution in pixels of the output texture and `--remesh_option` to specify the remeshing operation (None, Triangle, Quad).
@@ -89,6 +91,101 @@ For detailed usage of this script, use `python run.py --help`.
 python gradio_app.py
 ```
 
+## FastAPI Backend for Unity / VR
+
+This repository also includes a FastAPI backend for a Unity-driven capture-to-3D workflow:
+
+`user -> Unity (C#) -> image capture -> FastAPI -> SF3D processing -> GLB download -> Unity model loading -> VR visualization`
+
+The backend entrypoint is [backend/server.py](backend/server.py).
+
+### Backend Architecture
+
+The backend runs two FastAPI apps at the same time:
+
+- `Port 8080`: upload server for image submission
+- `Port 8081`: download server for generated `.glb` models
+
+Default routes:
+
+- `GET /health` on port `8080`: model readiness and backend health
+- `POST /generate` on port `8080`: upload an image with multipart field `file`
+- `POST /generate-from-image` on port `8080`: compatibility upload endpoint with multipart field `image`
+- `GET /download/{job_id}` on port `8081`: download generated `.glb`
+
+### Start the Backend
+
+From the repository root:
+
+```sh
+python backend/server.py
+```
+
+Optional arguments:
+
+```sh
+python backend/server.py --host 0.0.0.0 --upload-port 8080 --download-port 8081 --texture-resolution 2048 --remesh quad
+```
+
+### Request and Response Contract
+
+Upload request:
+
+- Method: `POST`
+- URL: `http://<server-ip>:8080/generate`
+- Content type: `multipart/form-data`
+- File field: `file`
+
+Successful response:
+
+```json
+{
+  "job_id": "<uuid>",
+  "status": "completed",
+  "filename": "<uuid>.glb",
+  "size_bytes": 123456,
+  "download_url": "http://<server-ip>:8081/download/<uuid>"
+}
+```
+
+Model download:
+
+```text
+GET http://<server-ip>:8081/download/<job_id>
+```
+
+The backend writes generated `.glb` files to `output/jobs/`.
+
+### Unity Integration Notes
+
+The Unity client can be configured to work with this backend using these settings:
+
+- `serverIP`: IP address of the machine running this repo
+- `uploadPort`: `8080`
+- `downloadPort`: `8081`
+- `useSeparateDownloadPort`: `true`
+
+Expected Unity-side flow:
+
+1. Capture or select an image in Unity.
+2. Encode and upload the image as PNG.
+3. Parse `job_id` and `download_url` from the response.
+4. Download the resulting `.glb`.
+5. Load the model in Unity and place it in the VR scene.
+
+### Deployment Notes
+
+- Ensure the Unity device and the backend machine are on the same network.
+- Allow Python through Windows Firewall when prompted.
+- If the model is not yet loaded, `GET /health` will show readiness state.
+- CPU fallback is automatic if no CUDA or MPS device is available.
+
+### Troubleshooting
+
+- `503 Model not ready yet`: wait until the backend finishes loading the SF3D model.
+- `400 Uploaded file is empty`: verify Unity is sending a non-empty PNG payload.
+- `404 Job not found or not ready`: retry the download request after generation completes.
+- Connection failures from Unity usually indicate a wrong `serverIP`, blocked ports, or firewall rules.
 
 ## ComfyUI extension
 
@@ -96,29 +193,34 @@ Custom nodes and an [example workflow](./demo_files/workflows/sf3d_example.json)
 
 To install:
 
-* Clone this repo into ```custom_nodes```:
- ```shell
-  $ cd ComfyUI/custom_nodes
-  $ git clone https://github.com/Stability-AI/stable-fast-3d
- ```
-* Install dependencies:
- ```shell
-  $ cd stable-fast-3d
-  $ pip install -r requirements.txt
- ```
-* Restart ComfyUI
+- Clone this repo into `custom_nodes`:
+
+```shell
+ $ cd ComfyUI/custom_nodes
+ $ git clone https://github.com/Stability-AI/stable-fast-3d
+```
+
+- Install dependencies:
+
+```shell
+ $ cd stable-fast-3d
+ $ pip install -r requirements.txt
+```
+
+- Restart ComfyUI
 
 ## Remesher Options:
 
-  -`none`: mesh unchanged after generation. No CPU overhead.
+-`none`: mesh unchanged after generation. No CPU overhead.
 
-  -`triangle`: verticies and edges are rearranged to form a triangle topography. Implementation is from: *"[A Remeshing Approach to Multiresolution Modeling](https://github.com/sgsellan/botsch-kobbelt-remesher-libigl)" by M. Botsch and L. Kobbelt*. CPU overhead expected.
+-`triangle`: verticies and edges are rearranged to form a triangle topography. Implementation is from: _"[A Remeshing Approach to Multiresolution Modeling](https://github.com/sgsellan/botsch-kobbelt-remesher-libigl)" by M. Botsch and L. Kobbelt_. CPU overhead expected.
 
-  -`quad`: verticies and edges are rearanged in quadrilateral topography with a proper quad flow. The quad mesh is split into triangles for export with GLB. Implementation is from *"[Instant Field-Aligned Meshes](https://github.com/wjakob/instant-meshes)" from Jakob et al.*. CPU overhead expected.
+-`quad`: verticies and edges are rearanged in quadrilateral topography with a proper quad flow. The quad mesh is split into triangles for export with GLB. Implementation is from _"[Instant Field-Aligned Meshes](https://github.com/wjakob/instant-meshes)" from Jakob et al._. CPU overhead expected.
 
 Additionally the target vertex count can be specified. This is not a hard constraint but a rough vertex count the method aims to create. This target is ignored if the remesher is set to `none`.
 
 ## Citation
+
 ```BibTeX
 @article{sf3d2024,
   title={SF3D: Stable Fast 3D Mesh Reconstruction with UV-unwrapping and Illumination Disentanglement},
